@@ -2,6 +2,9 @@
 
 Despliegue de un sitio web estático utilizando **Amazon S3** como almacenamiento de los ficheros del sitio y **Amazon CloudFront** como CDN para distribuirlo de forma rápida y segura (HTTPS).
 
+🔗 **Demo en vivo (Netlify):** https://homer-simpsons-page.netlify.app/
+> Este enlace es un despliegue aparte en Netlify (con HTTPS ya incluido por defecto), usado como referencia rápida de la web. No forma parte de la infraestructura AWS documentada en este repositorio.
+
 ## 📐 Arquitectura
 
 ![Arquitectura: usuario → CloudFront (Origin Access Control) → S3 Bucket (Bucket Policy), con acceso directo al bucket bloqueado](docs/arquitectura.png)
@@ -158,19 +161,118 @@ AWS confirma *"Se editó correctamente la política de buckets"*, con el **Bloqu
 
 Para corregir las limitaciones de la Parte 1, se coloca **Amazon CloudFront** delante del bucket: añade HTTPS mediante un certificado de **ACM** y cachea el contenido en ubicaciones *edge*, reduciendo las peticiones y la transferencia de datos que llegan a S3.
 
-### 5. Creación de la distribución de CloudFront
+### 5. Revertir la configuración pública del bucket
+
+Antes de meter CloudFront por delante, se deshace la configuración pública aplicada en la Parte 1, ya que el bucket debe volver a quedar **privado**: el acceso a partir de ahora lo gestionará únicamente CloudFront mediante **Origin Access Control (OAC)**, no el propio bucket.
+
+Pasos realizados, en orden inverso a como se configuraron:
+
+1. **Eliminar la Bucket Policy** de lectura pública (`Permisos` → `Política de bucket` → `Eliminar`), que concedía `s3:GetObject` a cualquiera (`Principal: "*"`).
+2. **Reactivar "Bloquear todo el acceso público"** (`Permisos` → *Bloquear acceso público (configuración del bucket)* → `Editar` → marcar las 4 opciones → confirmar).
+3. **Deshabilitar el Alojamiento de sitios web estáticos** (`Propiedades` → *Alojamiento de sitios web estáticos* → `Editar` → `Desactivar`), ya que el *website endpoint* de S3 no se usará: CloudFront accederá al bucket por el endpoint REST estándar mediante OAC.
+
+Con esto, el bucket vuelve a estar completamente privado y el *website endpoint* generado en la Parte 1 deja de responder — tal y como exige la arquitectura con OAC + Bucket Policy restrictiva del diagrama inicial.
+
+### 6. Creación de la distribución de CloudFront
+
+Se busca **CloudFront** en la consola de AWS y se accede a `Distributions` → `Create distribution`.
+
+![Búsqueda del servicio CloudFront en la consola de AWS](screenshots/14-buscar-cloudfront.png)
+
+**Paso 1 — Choose a plan:** CloudFront ofrece dos modelos de precio:
+
+- **Flat-rate plans** — precio mensual fijo (desde $0/mes el plan Free) que incluye CDN, WAF, protección DDoS, DNS y logging, con tope de gasto previsible.
+- **Pay as you go** — precio variable según el uso real (tráfico y peticiones), sin cuota fija ni techo de gasto.
+
+![Comparativa de planes de CloudFront: Free, Pro, Business, Premium](screenshots/15-elegir-plan.png)
+
+Se elige **Pay as you go**, ya que para este proyecto (tráfico bajo y puntual) resulta más económico pagar solo por lo que se consume en lugar de una cuota fija mensual.
+
+![Plan Pay as you go seleccionado, con tabla comparativa de costes estimados por nivel de tráfico](screenshots/16-pago-bajo-demanda.png)
+
+**Paso 3 — Specify origin:** se elige el tipo de origen **Amazon S3**, ya que el contenido estático (ficheros y assets del sitio) vive en el bucket creado en la Parte 1.
+
+![Selección del tipo de origen Amazon S3 en la creación de la distribución de CloudFront](screenshots/17-tipo-origen.png)
+
+- **Origin path:** `/` (vacío/raíz) — no se añade ningún prefijo, ya que `index.html` y el resto de ficheros están directamente en la raíz del bucket (ver [paso 2](#2-subida-de-los-ficheros-del-sitio)).
+
+**Settings** — se dejan las opciones recomendadas por defecto:
+
+- ✅ **Allow private S3 bucket access to CloudFront (Recommended)** — esto es justo lo que implementa el diagrama de arquitectura original: CloudFront crea y gestiona automáticamente un **Origin Access Control (OAC)**, y actualiza la **Bucket Policy** del bucket para que solo acepte peticiones que vengan en nombre de esta distribución de CloudFront, bloqueando cualquier otro acceso directo.
+- **Origin settings:** Use recommended origin settings.
+- **Cache settings:** Use recommended cache settings tailored to serving S3 content.
+
+![Settings de la distribución: Allow private S3 bucket access to CloudFront activado, configuración de origen y caché recomendadas](screenshots/18-settings-oac.png)
+
+**Paso 4 — Enable security:** se **deshabilita AWS WAF** (Web Application Firewall). Aunque añade protección extra (reglas, bloqueo de bots, etc.), tiene un coste adicional elevado que no se justifica para este proyecto de demostración con tráfico bajo.
+
+**Pasos 5 y 6 — Get TLS certificate / Review and create:** se revisa la configuración y se pulsa **Create distribution**, dejando el certificado TLS por defecto de CloudFront (dominio `*.cloudfront.net`), ya que de momento no se usa un dominio personalizado.
+
+Al crear la distribución con **"Allow private S3 bucket access to CloudFront"** activado, AWS genera automáticamente la **Bucket Policy** necesaria para que únicamente esa distribución de CloudFront (identificada por su OAC) pueda leer del bucket:
+
+```json
+{
+  "Version": "2008-10-17",
+  "Id": "PolicyForCloudFrontPrivateContent",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "cloudfront.amazonaws.com"
+      },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::demo-web-estatica-proyecto/*",
+      "Condition": {
+        "ArnLike": {
+          "AWS:SourceArn": "arn:aws:cloudfront::<ACCOUNTID>:distribution/<DISTRIBUTION-ID>"
+        }
+      }
+    }
+  ]
+}
+```
+
+Esta política (pegada en `Permisos` → `Política de bucket` del bucket) es la pieza clave de la arquitectura con OAC: a diferencia de la política pública de la Parte 1 (`Principal: "*"`), aquí el `Principal` está restringido al **servicio CloudFront** (`cloudfront.amazonaws.com`), y la condición `AWS:SourceArn` limita el acceso **únicamente a esta distribución concreta** (sustituyendo `<ACCOUNTID>` y `<DISTRIBUTION-ID>` por los valores reales). El bucket sigue siendo privado — nadie puede acceder a los objetos directamente, solo a través de esta distribución de CloudFront.
+
+**Distribución creada** (`frontend`), con su dominio generado por CloudFront:
+
+🔗 **https://d1mfi71h3wqbg9.cloudfront.net**
+
+![Detalles de la distribución CloudFront creada: dominio d1mfi71h3wqbg9.cloudfront.net](screenshots/19-distribucion-creada.png)
+
+**Problema:** al visitar la URL raíz de ese dominio no se mostraba la web. Con `Origin path` en `/`, CloudFront no sabe qué fichero servir por defecto al pedir la raíz (`/`) — a diferencia de S3 Website Hosting, CloudFront **no asume `index.html` automáticamente**.
+
+**Solución:** en la distribución → pestaña **General** → **Settings** → `Edit` → campo **Default root object**, se añade `index.html`. Así CloudFront devuelve ese fichero cuando se solicita la raíz del sitio.
+
+![Edición de settings de la distribución: campo Default root object para añadir index.html](screenshots/20-default-root-object.png)
+
+Tras guardar, la web ya se sirve correctamente desde el dominio de CloudFront — ahora sí con HTTPS.
+
+![Settings guardados con Default root object: index.html](screenshots/21-default-root-object-guardado.png)
+
+**Configuración de Error Pages:** en la pestaña `Error pages` de la distribución → `Create custom error response`:
+
+![Formulario de creación de respuesta de error personalizada en CloudFront](screenshots/22-error-pages-form.png)
+
+- **HTTP error code:** `403: Forbidden`
+- **Error caching minimum TTL:** `10` segundos
+- **Customize error response:** `Yes`
+  - **Response page path:** `/index.html`
+  - **HTTP Response code:** `200: OK`
+
+![Configuración de respuesta personalizada: error 403 redirige a /index.html devolviendo un 200 OK](screenshots/23-error-response-403.png)
+
+Con esto, cualquier **403** devuelto por el origen (por ejemplo al pedir una ruta que no existe en el bucket) se traduce en servir `index.html` con un código **200 OK**, en vez de mostrar al usuario el XML de error crudo de S3.
+
+### 7. Configuración de HTTPS / certificado SSL
 
 _Pendiente de documentar._
 
-### 6. Configuración de HTTPS / certificado SSL
+### 8. Configuración de dominio personalizado (opcional)
 
 _Pendiente de documentar._
 
-### 7. Configuración de dominio personalizado (opcional)
-
-_Pendiente de documentar._
-
-### 8. Pruebas finales
+### 9. Pruebas finales
 
 _Pendiente de documentar._
 
