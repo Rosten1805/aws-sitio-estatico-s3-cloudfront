@@ -361,22 +361,6 @@ Para el registro final que apunta la web al dominio, en vez de un CNAME manual s
 
 Con el registro Alias creado, **la configuración de dominio personalizado y HTTPS queda completa**: el sitio es accesible mediante el dominio propio sobre `683342011741.realhandsonlabs.net`, servido por CloudFront con certificado SSL/TLS válido.
 
-## 📸 Capturas de pantalla
-
-> Las capturas se añadirán en la carpeta [`screenshots/`](screenshots/) y se irán enlazando aquí a medida que avancemos.
-
-## 💰 Costes estimados
-
-_Pendiente de documentar (estimación de costes de S3 + CloudFront según tráfico esperado)._
-
-## 🧹 Limpieza de recursos
-
-_Pendiente de documentar (pasos para eliminar los recursos de AWS y evitar costes innecesarios)._
-
-## 📚 Recursos y enlaces útiles
-
-_Pendiente de añadir enlaces a documentación oficial de AWS consultada durante el proyecto._
-
 ## 👤 Autoría
 
 Proyecto creado por **Cristina Cañadas Gómez - Limón**
