@@ -9,9 +9,9 @@ Despliegue de un sitio web estático utilizando **Amazon S3** como almacenamient
 
 ![Arquitectura: usuario → CloudFront (Origin Access Control) → S3 Bucket (Bucket Policy), con acceso directo al bucket bloqueado](docs/arquitectura.png)
 
-El diseño original planteaba bloquear el acceso directo al bucket de S3, permitiendo el acceso solo a través de **CloudFront** mediante **Origin Access Control (OAC)** y una **Bucket Policy** restrictiva.
+Este es el diseño final del proyecto (ver **Parte 2** más abajo): el acceso directo al bucket de S3 está bloqueado, y solo se permite el acceso a través de **CloudFront** mediante **Origin Access Control (OAC)** y una **Bucket Policy** restrictiva.
 
-> ⚠️ **Cambio de diseño:** finalmente se optó por habilitar el **Alojamiento de sitios web estáticos (Static Website Hosting)** de S3, lo que requiere que el bucket sea **público** (CloudFront usará el endpoint de website hosting como *origen personalizado*, no OAC, ya que ese endpoint no soporta peticiones firmadas con SigV4). El diagrama de arriba se actualizará para reflejar este cambio.
+> ℹ️ Durante el proyecto se pasó primero por una versión con el bucket **público** (Static Website Hosting sin CloudFront, documentada en la **Parte 1**) para comprobar en primera persona sus limitaciones (sin HTTPS, coste por tráfico directo), antes de revertirla y llegar a este diseño final con OAC.
 
 ## 🎯 Objetivo del proyecto
 
@@ -37,6 +37,29 @@ homers-web-page-master/
 
 > ⚠️ Nota de licencias: las fuentes Cooper Black incluidas (`COOPBL.TTF` de Microsoft y `CooperBlackStd.otf` de Adobe) son fuentes comerciales con copyright de terceros. Se mantienen en el repositorio por tratarse de un proyecto personal/educativo, sin uso comercial.
 
+### 🔄 Cómo actualizar el sitio
+
+En S3 **no se pueden editar los archivos directamente desde la consola** (no hay un editor de texto in situ para HTML/CSS/JS). Para publicar cualquier cambio hay que:
+
+1. Modificar el fichero localmente (en [`homers-web-page-master/`](homers-web-page-master/)).
+2. **Volver a subirlo (sobrescribirlo) al bucket de S3** con el mismo nombre/ruta.
+3. Si la distribución de CloudFront ya sirvió antes ese fichero, lo tiene **cacheado** en el edge: el cambio no se ve de inmediato en el navegador hasta que expira el TTL de caché. Para verlo al instante hay que crear una **invalidación de caché**.
+
+La pestaña **Error pages** confirma la regla creada en el [paso 6](#6-creación-de-la-distribución-de-cloudfront) (403 → `/index.html` → 200):
+
+![Pestaña Error pages de la distribución, con la regla 403 → /index.html → 200 ya creada](screenshots/24-error-pages-confirmado.png)
+
+Para la invalidación: pestaña **Invalidations** → `Create invalidation` → se indica la ruta a invalidar en **Object paths**:
+
+- `/*` → invalida **todo** el contenido cacheado (más simple, pero fuerza a recargar todo desde el origen).
+- Un path exacto (p. ej. `/index.html`) → invalida **solo ese fichero**, más eficiente si solo ha cambiado uno.
+
+![Invalidación creada correctamente para /index.html, con estado "In progress"](screenshots/25-invalidacion-creada.png)
+
+AWS confirma *"Successfully created invalidation"*; el estado pasa a **In progress** y, al completarse, la próxima petición a ese path se sirve ya desde el origen (contenido actualizado) en lugar de la copia cacheada.
+
+> ⚠️ Importante: al invalidar un path, CloudFront **descarta la copia cacheada** y, en la siguiente visita, tiene que **volver a pedir ese fichero al bucket de S3** (una nueva solicitud al origen) para recachearlo. Es decir, cada invalidación "cuesta" al menos una petición extra a S3 — por eso conviene invalidar solo los paths que realmente han cambiado (en vez de `/*` siempre) y no abusar de las invalidaciones en despliegues muy frecuentes.
+
 ## 🛠️ Servicios de AWS utilizados
 
 - **Amazon S3** — almacenamiento del contenido estático.
@@ -44,6 +67,8 @@ homers-web-page-master/
 - **AWS Certificate Manager (ACM)** — certificado SSL/TLS (si se usa dominio propio).
 - **Amazon Route 53** — gestión del dominio (si aplica).
 - **IAM** — políticas de acceso al bucket.
+
+> 💡 **Alternativa: AWS Amplify.** AWS ofrece **Amplify Hosting**, pensado para quien no quiere gestionar la infraestructura manualmente: en pocos clics levanta algo equivalente a este S3 + CloudFront (almacenamiento + CDN + HTTPS) de forma gestionada, incluso con CI/CD conectado a un repositorio Git. En este proyecto se monta todo manualmente (S3, bucket policy, OAC, CloudFront) **a propósito**, con fines didácticos, para entender cómo funciona cada pieza por debajo.
 
 ## ✅ Requisitos previos
 
@@ -266,11 +291,75 @@ Con esto, cualquier **403** devuelto por el origen (por ejemplo al pedir una rut
 
 ### 7. Configuración de HTTPS / certificado SSL
 
-_Pendiente de documentar._
+A diferencia del endpoint de S3 (sin HTTPS), **CloudFront sirve el sitio en HTTPS desde el momento en que se crea la distribución**, sin configuración adicional: usa automáticamente un **certificado SSL/TLS por defecto de CloudFront** para su dominio `*.cloudfront.net`, sin coste extra y sin pasar por ACM.
+
+🔒 **https://d1mfi71h3wqbg9.cloudfront.net** — ya accesible con HTTPS.
+
+> El certificado por defecto solo cubre el dominio `*.cloudfront.net`. Para usar un **dominio propio** (paso 8) haría falta solicitar un certificado en **AWS Certificate Manager (ACM)**, obligatoriamente en la región `us-east-1` (N. Virginia), y asociarlo a la distribución.
 
 ### 8. Configuración de dominio personalizado (opcional)
 
-_Pendiente de documentar._
+**8.1. Zona alojada en Route 53** — en `Route 53` → `Zonas hospedadas` ya existe una **zona alojada pública** para el dominio del laboratorio, `683342011741.realhandsonlabs.net` (subdominio con el ID de cuenta, provisto por el entorno de prácticas), con sus registros **NS** y **SOA** por defecto:
+
+![Zonas hospedadas de Route 53 con el dominio 683342011741.realhandsonlabs.net](screenshots/26-route53-zonas-hospedadas.png)
+
+![Detalle de la zona hospedada: registros NS y SOA](screenshots/27-route53-registros.png)
+
+**8.2. Solicitar certificado en ACM** — se busca **Certificate Manager (ACM)** en la consola:
+
+![Búsqueda de ACM (Certificate Manager) en la consola de AWS](screenshots/28-buscar-acm.png)
+
+> ⚠️ Recordatorio: el certificado debe solicitarse en la región **`us-east-1` (N. Virginia)**, el único lugar donde ACM emite certificados que CloudFront puede usar.
+
+Se pulsa **Request a certificate** → **New ACM managed certificate**:
+
+![Panel de ACM: solicitar un nuevo certificado gestionado](screenshots/29-solicitar-certificado.png)
+
+En el asistente se configura:
+
+- **Certificate type:** Request a **public certificate**.
+- **Fully qualified domain name:** el dominio (o subdominio) sobre `683342011741.realhandsonlabs.net` que usará la web.
+- El resto de opciones (validación DNS, tipo de clave, etc.) se dejan **por defecto**.
+
+**8.3. Crear el registro en Route 53** — en la zona hospedada `683342011741.realhandsonlabs.net` → `Create record` (método **Quick create**):
+
+![Formulario de creación de registro DNS en Route 53, modo Quick create](screenshots/30-crear-registro-cname.png)
+
+- **Record name:** el subdominio elegido (ej. `www`, dejar en blanco para usar el dominio raíz).
+- **Record type:** **CNAME** — un registro que hace que el (sub)dominio **apunte a otro dominio** en vez de a una IP directa; en este caso, apuntará al dominio de la distribución de CloudFront (`d1mfi71h3wqbg9.cloudfront.net`) en lugar de a una IP fija.
+- **Value:** el dominio de CloudFront al que debe redirigir.
+- **TTL:** `300` segundos (valor por defecto).
+- **Routing policy:** Simple routing.
+
+> Se usa CNAME (en vez de un registro A con IP) precisamente porque CloudFront no expone una IP fija: su dominio puede cambiar de IPs por detrás, así que el DNS debe apuntar al **nombre de dominio** de la distribución, no a una dirección concreta.
+
+**8.4. Esperar la validación del certificado** — ACM valida la propiedad del dominio mediante un registro **CNAME de validación** (distinto del CNAME del paso anterior) que añade automáticamente a la zona de Route 53. Mientras tanto, el certificado queda en estado **"Pending validation"**.
+
+⏳ Hay que esperar a que ACM confirme la validación por DNS y el certificado pase a estado **"Issued"** — este proceso no es instantáneo (puede tardar varios minutos). Hasta que el certificado esté emitido (global, no solo en la región `us-east-1` donde se solicitó, sino disponible para asociarse a cualquier distribución de CloudFront), no se puede seleccionar en la configuración de la distribución.
+
+**8.5. Añadir el dominio a la distribución de CloudFront** — una vez emitido el certificado, se vuelve a la distribución (`frontend`) → pestaña **General** → **Settings** → **Add domain**:
+
+![Settings de la distribución CloudFront con el botón Add domain para asociar el dominio personalizado](screenshots/31-add-domain-cloudfront.png)
+
+Se añade el dominio/subdominio configurado en Route 53 como **Alternate domain name (CNAME)** de la distribución, y se selecciona el certificado de ACM ya emitido. A partir de aquí, la web será accesible tanto desde `d1mfi71h3wqbg9.cloudfront.net` como desde el dominio personalizado, ambos con HTTPS.
+
+**8.6. Confirmar la validación del certificado y crear el registro final en Route 53** — la zona hospedada ya muestra **4 registros**: los NS/SOA originales, más **2 registros CNAME de validación** que ACM añadió automáticamente para confirmar la propiedad del dominio:
+
+![Zona hospedada con 4 registros: NS, SOA y los 2 CNAME de validación de ACM](screenshots/32-route53-registros-validacion.png)
+
+Para el registro final que apunta la web al dominio, en vez de un CNAME manual se usa un **registro tipo A con Alias**:
+
+- **Record type:** `A`
+- **Alias:** activado (`Alias to CloudFront distribution`)
+- **Región:** US East (N. Virginia) — obligatoria para alias a CloudFront.
+- **Route traffic to:** se elige la distribución de CloudFront (`frontend`).
+- **Routing policy:** Simple routing.
+
+![Creación de registro A con Alias apuntando a la distribución de CloudFront](screenshots/33-registro-alias-cloudfront.png)
+
+> 💡 Se prefiere un **Alias (A)** sobre un CNAME manual porque es la forma recomendada por AWS de apuntar un dominio (incluido el dominio raíz/apex, donde un CNAME no está permitido por el estándar DNS) a un recurso de AWS como CloudFront: Route 53 resuelve internamente la IP, sin coste adicional por esas consultas y sin depender de una IP fija.
+
+Con el registro Alias creado, **la configuración de dominio personalizado y HTTPS queda completa**: el sitio es accesible mediante el dominio propio sobre `683342011741.realhandsonlabs.net`, servido por CloudFront con certificado SSL/TLS válido.
 
 ### 9. Pruebas finales
 
