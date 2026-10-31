@@ -7,9 +7,9 @@ Despliegue de un sitio web estático utilizando **Amazon S3** como almacenamient
 
 ## 📐 Arquitectura
 
-![Arquitectura: usuario → CloudFront (Origin Access Control) → S3 Bucket (Bucket Policy), con acceso directo al bucket bloqueado](docs/arquitectura.png)
+![Arquitectura: usuario → Route 53 (DNS) → CloudFront (con certificado HTTPS de ACM) → S3 Bucket mediante Origin Access Control (OAC) y Bucket Policy restrictiva, con despliegue opcional vía GitHub Actions](docs/arquitectura.png)
 
-Este es el diseño final del proyecto (ver **Parte 2** más abajo): el acceso directo al bucket de S3 está bloqueado, y solo se permite el acceso a través de **CloudFront** mediante **Origin Access Control (OAC)** y una **Bucket Policy** restrictiva.
+Este es el diseño final del proyecto (ver **Parte 2** más abajo): el acceso directo al bucket de S3 está bloqueado, y solo se permite el acceso a través de **CloudFront** mediante **Origin Access Control (OAC)** y una **Bucket Policy** restrictiva. **Route 53** resuelve el dominio personalizado hacia CloudFront, que sirve el contenido con **HTTPS** (certificado de **ACM**), caché y páginas de error personalizadas; el despliegue del sitio en el bucket puede automatizarse con **GitHub Actions**.
 
 > ℹ️ Durante el proyecto se pasó primero por una versión con el bucket **público** (Static Website Hosting sin CloudFront, documentada en la **Parte 1**) para comprobar en primera persona sus limitaciones (sin HTTPS, coste por tráfico directo), antes de revertirla y llegar a este diseño final con OAC.
 
